@@ -1,0 +1,590 @@
+Sub wavelengthAudit()
+
+    Call xlFunctionalitiesOff
+   
+    Dim transceiverWS As Worksheet
+    Dim errorLogWS As Worksheet
+    Dim errorLogRowNum As Long
+    Dim errorLogColNum As Long
+    Dim errorLogHeaders As Variant
+    Dim correspondingColNums As Variant
+   
+    'Set worksheet variables to their corresponding worksheets in ActiveWorkbook
+    Set transceiverWS = ActiveWorkbook.Sheets("transceivers")
+   
+    'Delete existing error log if it exists
+    errorLogWSExists = sheetExists("error log (Wavelength)")
+    If errorLogWSExists Then
+        Set errorLogWS = ActiveWorkbook.Sheets("error log (Wavelength)")
+        errorLogWS.Delete
+    End If
+   
+    'Add a sheet to the workbook to hold the error log
+    Sheets.Add.Name = "error log (Wavelength)"
+    Set errorLogWS = ActiveWorkbook.Sheets("error log (Wavelength)")
+   
+    'Insert necessary headers into error log
+    errorLogHeaders = Array("intID", "Name", "Description", "ShortDescription", "Transceiver Category | 5659", "Transceiver Type | 4807", "ITU Band - Spacing | 5674", "ITU Channel Spacing | 5601", "ITU Frequency | 4820", "ITU Wavelength | 4821", "Wavelength | 4813")
+    errorLogWS.Activate
+    errorLogWS.Columns.ColumnWidth = 20
+    Call setHeadersInWorksheet(errorLogWS, errorLogHeaders)
+   
+    errorLogheadersSize = findArraySize(errorLogHeaders)
+   
+    'Add a column for the 'What We Buy' Parts
+    Cells(1, errorLogheadersSize + 1) = "What We Buy"
+   
+    'Add a column for 'Tests Failed'
+    Cells(1, errorLogheadersSize + 2) = "Tests Failed"
+    errorLogWS.Columns(errorLogheadersSize + 2).ColumnWidth = 35
+   
+    'Reactivate the transceivers worksheet to gather corresponding column numbers
+    transceiverWS.Activate
+    correspondingColNums = getCorrespondingColNums(errorLogHeaders, transceiverWS)
+   
+    'These are the tests that are run throughout code to identify errors.
+    'TEST 1: True if DWDM type is invalid (e.g. a Cisco compatible channel with 100Ghz spacing)
+    'TEST 2: Any ITU Column is inconsistent with the lookup table (inconsistent wavelengths/freqs)
+    'TEST 3: ITU wavelength <> wavelength4813
+    'TEST 4: Wavelength in long description is inconsistent with wavelength 4813
+    'TEST 5: Wavelength in short description is inconsistent with wavelength 4813
+    'TEST 6: Wavelength value is "N/A" but type is not Copper or Converter OR Type is Copper or Converter and value is not "N/A"
+    'TEST 7: Invalid tunability range (e.g. wavelength is tunable and 1530nm-1560nm)
+    'TEST 8: Short description should say "tunable" but does not.
+    'TEST 9: Check that WLFromWWB is consistent with Wavelength4813 (if possible).
+    'TEST 10: ITU-Specific Columns are populated even though part is not a DWDM
+   
+    'Define 1 boolean value which is True when any of the above tests fails.
+    Dim errorIdentified As Boolean
+   
+    'Define a string to hold our message for "tests failed"
+    Dim testsFailed As String
+    Dim PartName As String
+    Dim WWB As String
+   
+    'Define an array of boolean values. If the value is True, then corresponding cell in filteredRow will be highlighted in error Log.
+    Dim cellsToBeHighlighted() As Variant
+    ReDim cellsToBeHighlighted(errorLogheadersSize + 2)
+   
+    lastRow = transceiverWS.Cells(Rows.Count, 2).End(xlUp).Row
+    errorLogRowNum = 2
+   
+    For x = 2 To lastRow
+   
+        Cells(x, 1).Activate
+       
+        'Grab relevent data from the transceivers workseet
+        filteredRow = getFilteredRow(transceiverWS, correspondingColNums, x)
+        intID = filteredRow(0)
+        Name = filteredRow(1)
+        desLong = filteredRow(2)
+        desShort = filteredRow(3)
+        transceiverCategory = filteredRow(4)
+        transceiverType = filteredRow(5)
+        wavelength4813 = filteredRow(10)
+       
+        PartName = Name
+        WWB = Get_WhatWeBuy(PartName)
+       
+        If WWB <> Empty Then
+        'Find the wavelength from the WWB
+            WLFromWWB = FindWLinWWB(WWB)
+            'If 4 digits are returned, add a 15 to the front if it doesn't start with 1.
+            If WLFromWWB <> Empty Then
+                 If CInt(WLFromWWB) > 1999 Then
+                    WLFromWWB = "15" & WLFromWWB
+                    WLFromWWB = CDbl(WLFromWWB)
+                    WLFromWWB = WLFromWWB / 100
+                End If
+            Else
+                'If the regex formula returns none, check for 850nm
+                If Not InStr(WWB, "850") = 0 Then
+                    WLFromWWB = "850"
+                End If
+            End If
+            'If the What We Buy part does not start with ADD, we ignore the wavelength value by setting it to "".
+            whatWeBuySplit = Split(WWB, "-")
+            If InStr(whatWeBuySplit(0), "ADD") = 0 Then
+                WLFromWWB = ""
+            End If
+        Else
+        'WWB is empty so set an error.
+            errorIdentified = True
+            testsFailed = testsFailed & "No 'What We Buy Part' identified to audit wavelength against." + vbCrLf
+            cellsToBeHighlighted(1) = True
+            cellsToBeHighlighted(11) = True
+        End If
+       
+        Select Case transceiverCategory
+           
+            Case "DWDM"
+               
+                'Define DWDM specific variables (i.e. ITU information)
+                ITUBand = filteredRow(6)
+                ITUChannelSpacing = filteredRow(7)
+                ITUFreq = filteredRow(8)
+                ITUWavelength = filteredRow(9)
+               
+                Dim dwdmType As Integer
+                dwdmType = determineDwdmType(ITUChannelSpacing, ITUFreq, ITUWavelength, CompOEM)
+                If Not InStr(ITUFreq, "GHZ") = 0 Then
+                    ITUFreq = Replace(ITUFreq, "Z", "z")
+                    errorIdentified = True
+                    testsFailed = testsFailed & "ITUFrequency states GHZ instead of GHz (inconsistency in notation)" + vbCrLf
+                    cellsToBeHighlighted(9) = True
+                End If
+                Select Case dwdmType
+                   
+                    Case 1 'DWDM is tunable and CISCO compatible
+                        'TEST 7: Proper Tunability Range
+                        If InStr(wavelength4813, "1530nm to 1565nm") = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Wavelength tunable range is incorrect. Long description must also be updated." + vbCrLf
+                            cellsToBeHighlighted(3) = True 'highlight long description
+                            cellsToBeHighlighted(11) = True 'hightlight wavelength 4813
+                        End If
+                       
+                    Case 2 'DWDM is not tunable and CISCO compatible (50GHz)
+                   
+                        'Error if ITUFreq/WL is Empty
+                        If ITUFreq = Empty Or ITUWavelength = Empty Then
+                            'Error
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Missing ITU Frequency &/or Wavelength Data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Error if ITUFreq/WL is YY/XXX.XX (ie has placeholders)
+                        ElseIf Not InStr(ITUFreq, "Y") = 0 Or Not InStr(ITUWavelength, "X") = 0 Then
+                            'Error?
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITU Frequency &/or Wavelength has invalid data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Calculate Freq/WL and check that they are consistent
+                        Else
+                            'Reformat Freq And Wavelength for calculating
+                            ITUFreq_chngd = Replace(ITUFreq, "GHz", "")
+                            ITUWavelength_chngd = Replace(ITUWavelength, "nm", "")
+                            ITUFreq_chngd = CDbl(ITUFreq_chngd)
+                            ITUWavelength_chngd = CDbl(ITUWavelength_chngd)
+                            'Check that ITU Frequency and ITU Wavelength are consistent.
+                            CalculatedWL = Round(((1 / ITUFreq_chngd) * 299792458), 2)
+                            CalculatedFreq = Round((1 / ITUWavelength_chngd) * 299792458 / 10) * 10
+                           
+                            'TEST 2: Frequency Consistency Check
+                            If InStr(ITUFreq, CStr(CalculatedFreq)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 50Ghz Freq inconsistent with calculated Freq from given WL. Should be " & CStr(CalculatedFreq) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                            'TEST 2: Wavelength Consistency Check
+                            If InStr(ITUWavelength, CStr(CalculatedWL)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 50GHz wavelength inconsistent with calculated WL from given Freq. Should be " & CStr(CalculatedWL) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                        End If
+                       
+                        'TEST 9: Check WWB Wavelength with Wavelength 4813
+                        If WLFromWWB <> Empty Then
+                            If InStr(wavelength4813, WLFromWWB) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "Wavelength from 'What We Buy' differs from Wavelength | 4813." + vbCrLf
+                                cellsToBeHighlighted(11) = True
+                            End If
+                        End If
+                       
+                        'TEST 3: Wavelength4813 <> ITUWavelength
+                        If InStr(ITUWavelength, wavelength4813) = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITUWavelength differs from Wavelength | 4813." + vbCrLf
+                            cellsToBeHighlighted(10) = True
+                            cellsToBeHighlighted(11) = True
+                        End If
+                       
+                    Case 3 'DWDM is tunable and spaced by 100Ghz
+                        'TEST 7: Proper Tunability Range
+                        If InStr(wavelength4813, "1530nm to 1565nm") = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Wavelength tunable range is incorrect. Long description must also be updated." + vbCrLf
+                            cellsToBeHighlighted(3) = True 'highlight long description
+                            cellsToBeHighlighted(11) = True 'hightlight wavelength 4813
+                        End If
+                       
+                    Case 4 'DWDM is NOT tunable and spaced by 100Ghz
+                   
+                        'Error if ITUFreq/WL is Empty
+                        If ITUFreq = Empty Or ITUWavelength = Empty Then
+                            'Error
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Missing ITU Frequency &/or Wavelength Data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Error if ITUFreq/WL is YY/XXX.XX (ie has placeholders)
+                        ElseIf Not InStr(ITUFreq, "Y") = 0 Or Not InStr(ITUWavelength, "X") = 0 Then
+                            'Error?
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITU Frequency &/or Wavelength has invalid data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Calculate Freq/WL and check that they are consistent
+                        Else
+                            'Reformat Freq And Wavelength for calculating
+                            ITUFreq_chngd = Replace(ITUFreq, "GHz", "")
+                            ITUWavelength_chngd = Replace(ITUWavelength, "nm", "")
+                            ITUFreq_chngd = CDbl(ITUFreq_chngd)
+                            ITUWavelength_chngd = CDbl(ITUWavelength_chngd)
+                            'Check that ITU Frequency and ITU Wavelength are consistent.
+                            CalculatedWL = Round(((1 / ITUFreq_chngd) * 299792458), 2)
+                            CalculatedFreq = Round((1 / ITUWavelength_chngd) * 299792458 / 10) * 10
+                           
+                            'TEST 2: Frequency Consistency Check
+                            If InStr(ITUFreq, CStr(CalculatedFreq)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 100Ghz Freq inconsistent with calculated Freq from given WL. Should be " & CStr(CalculatedFreq) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                            'TEST 2: Wavelength Consistency Check
+                            If InStr(ITUWavelength, CStr(CalculatedWL)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 100Ghz WL inconsistent with calculated WL from given Freq. Should be " & CStr(CalculatedWL) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                        End If
+                       
+                        'TEST 9: Check WWB Wavelength with Wavelength 4813
+                        If WLFromWWB <> Empty Then
+                            If InStr(wavelength4813, WLFromWWB) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "Wavelength from 'What We Buy' differs from Wavelength | 4813." + vbCrLf
+                                cellsToBeHighlighted(11) = True
+                            End If
+                        End If
+                       
+                        'TEST 3: Wavelength4813 <> ITUWavelength
+                        If InStr(ITUWavelength, wavelength4813) = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITUWavelength differs from Wavelength | 4813." + vbCrLf
+                            cellsToBeHighlighted(10) = True
+                            cellsToBeHighlighted(11) = True
+                        End If
+                       
+                    Case 5 'DWDM is tunable and spaced by 50Ghz
+                        'TEST 7: Proper Tunability Range
+                        If InStr(wavelength4813, "1530nm to 1565nm") = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Wavelength tunable range is incorrect. Long description must also be updated." + vbCrLf
+                            cellsToBeHighlighted(3) = True 'highlight long description
+                            cellsToBeHighlighted(11) = True 'hightlight wavelength 4813
+                        End If
+                   
+                    Case 6 'DWDM is NOT tunable and spaced by 50Ghz
+                   
+                       'Error if ITUFreq/WL is Empty
+                        If ITUFreq = Empty Or ITUWavelength = Empty Then
+                            'Error
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Missing ITU Frequency &/or Wavelength Data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Error if ITUFreq/WL is YY/XXX.XX (ie has placeholders)
+                        ElseIf Not InStr(ITUFreq, "Y") = 0 Or Not InStr(ITUWavelength, "X") = 0 Then
+                            'Error?
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITU Frequency &/or Wavelength has invalid data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Calculate Freq/WL and check that they are consistent
+                        Else
+                            'Reformat Freq And Wavelength for calculating
+                            ITUFreq_chngd = Replace(ITUFreq, "GHz", "")
+                            ITUWavelength_chngd = Replace(ITUWavelength, "nm", "")
+                            ITUFreq_chngd = CDbl(ITUFreq_chngd)
+                            ITUWavelength_chngd = CDbl(ITUWavelength_chngd)
+                            'Check that ITU Frequency and ITU Wavelength are consistent.
+                            CalculatedWL = Round(((1 / ITUFreq_chngd) * 299792458), 2)
+                            CalculatedFreq = Round((1 / ITUWavelength_chngd) * 299792458 / 10) * 10
+                           
+                            'TEST 2: Frequency Consistency Check
+                            If InStr(ITUFreq, CStr(CalculatedFreq)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 50Ghz Freq inconsistent with calculated Freq from given WL. Should be " & CStr(CalculatedFreq) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                            'TEST 2: Wavelength Consistency Check
+                            If InStr(ITUWavelength, CStr(CalculatedWL)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 50GHz wavelength inconsistent with calculated WL from given Freq. Should be " & CStr(CalculatedWL) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                        End If
+                       
+                        'TEST 9: Check WWB Wavelength with Wavelength 4813
+                        If WLFromWWB <> Empty Then
+                            If InStr(wavelength4813, WLFromWWB) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "Wavelength from 'What We Buy' differs from Wavelength | 4813." + vbCrLf
+                                cellsToBeHighlighted(11) = True
+                            End If
+                        End If
+                       
+                        'TEST 3: Wavelength4813 <> ITUWavelength
+                        If InStr(ITUWavelength, wavelength4813) = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITUWavelength differs from Wavelength | 4813." + vbCrLf
+                            cellsToBeHighlighted(10) = True
+                            cellsToBeHighlighted(11) = True
+                        End If
+                       
+                    Case 7 'DWDM is cisco and spaced by 100GHz *use ITU grid*
+                        'Error if ITUFreq/WL is Empty
+                        If ITUFreq Is Empty And ITUWavelength Is Empty Then
+                            'Error
+                            errorIdentified = True
+                            testsFailed = testsFailed & "Missing ITU Frequency &/or Wavelength Data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Error if ITUFreq/WL is YY/XXX.XX (ie has placeholders)
+                        ElseIf Not InStr(ITUFreq, "Y") = 0 Or Not InStr(ITUWavelength, "X") = 0 Then
+                            'Error?
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITU Frequency &/or Wavelength has invalid data." + vbCrLf
+                            cellsToBeHighlighted(8) = True
+                            cellsToBeHighlighted(9) = True
+                           
+                        'Calculate Freq/WL and check that they are consistent
+                        Else
+                            'Reformat Freq And Wavelength for calculating
+                            ITUFreq_chngd = Replace(ITUFreq, "GHz", "")
+                            ITUWavelength_chngd = Replace(ITUWavelength, "nm", "")
+                            ITUFreq_chngd = CDbl(ITUFreq_chngd)
+                            ITUWavelength_chngd = CDbl(ITUWavelength_chngd)
+                            'Check that ITU Frequency and ITU Wavelength are consistent.
+                            CalculatedWL = Round(((1 / ITUFreq_chngd) * 299792458), 2)
+                            CalculatedFreq = Round((1 / ITUWavelength_chngd) * 299792458 / 10) * 10
+                           
+                            'TEST 2: Frequency Consistency Check
+                            If InStr(ITUFreq, CStr(CalculatedFreq)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 100Ghz Freq inconsistent with calculated Freq from given WL. Should be " & CStr(CalculatedFreq) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                            'TEST 2: Wavelength Consistency Check
+                            If InStr(ITUWavelength, CStr(CalculatedWL)) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "ITU 100GHz wavelength inconsistent with calculated WL from given Freq. Should be " & CStr(CalculatedWL) + vbCrLf
+                                cellsToBeHighlighted(8) = True
+                                cellsToBeHighlighted(9) = True
+                                cellsToBeHighlighted(10) = True
+                            End If
+                           
+                        End If
+                       
+                        'TEST 9: Check WWB Wavelength with Wavelength 4813
+                        If WLFromWWB <> Empty Then
+                            If InStr(wavelength4813, WLFromWWB) = 0 Then
+                                errorIdentified = True
+                                testsFailed = testsFailed & "Wavelength from 'What We Buy' differs from Wavelength | 4813." + vbCrLf
+                                cellsToBeHighlighted(11) = True
+                                cellsToBeHighlighted(12) = True
+                            End If
+                        End If
+                       
+                        'TEST 3: Wavelength4813 <> ITUWavelength
+                        If InStr(ITUWavelength, wavelength4813) = 0 Then
+                            errorIdentified = True
+                            testsFailed = testsFailed & "ITUWavelength differs from Wavelength | 4813." + vbCrLf
+                            cellsToBeHighlighted(10) = True
+                            cellsToBeHighlighted(11) = True
+                        End If
+                       
+                    Case Else
+                        'TEST 1: Invalid DWDM Type
+                        errorIdentified = True
+                        testsFailed = testsFailed & "ITU specific columns inconsistent with eachother. Invalid DWDM Type." + vbCrLf
+                        cellsToBeHighlighted(8) = True
+                        cellsToBeHighlighted(9) = True
+                        cellsToBeHighlighted(10) = True
+                       
+                End Select
+               
+                'TESTS For Tunable WL
+                If Not InStr(ITUFreq, "Tunable") = 0 Or Not InStr(ITUWavelength, "Tunable") = 0 Then
+                    'TEST 8: Check that short description says "Tunable"
+                    If InStr(desShort, "Tunable") = 0 Then 'If tunable is not in short description, error.
+                        errorIdentified = True
+                        testsFailed = testsFailed & "Short description should say 'tunable' but does not." + vbCrLf
+                        cellsToBeHighlighted(4) = True
+                        cellsToBeHighlighted(9) = True
+                    End If
+                    'TEST 4: Check that wavelength4813 is in long description
+                    If InStr(desLong, wavelength4813) = 0 Then 'If wavelength is not in desLong, set flag5.
+                        errorIdentified = True
+                        testsFailed = testsFailed & "Long description does not contain 'Wavelength | 4813' value." + vbCrLf
+                        cellsToBeHighlighted(3) = True
+                        cellsToBeHighlighted(11) = True
+                    End If
+                End If
+               
+        Case "Copper"
+       
+            'TEST 6: If Transceiver Category is Copper, wavelength must be "N/A"
+            If InStr(wavelength4813, "N/A") = 0 Then
+                errorIdentified = True
+                testsFailed = testsFailed & "Transceiver Category is 'Copper' but Wavelength | 4813 is not 'N/A'" + vbCrLf
+                cellsToBeHighlighted(5) = True
+                cellsToBeHighlighted(11) = True
+            End If
+           
+            'TEST 10: Check if the ITU specific columns are populated even though Transceiver Category is NOT DWDM
+            For Count = 6 To 9
+                If filteredRow(Count) <> Empty Then
+                    nonDWDMPartError = True
+                    cellsToBeHighlighted(Count) = True
+                End If
+            Next Count
+            If nonDWDMPartError Then
+                testsFailed = testsFailed & "Transceiver type not DWDM but at least 1 ITU column is populated" + vbCrLf
+            End If
+            'reset the nonDWDMPartError variable
+            nonDWDMPartError = False
+               
+           
+        Case "Converter"
+       
+            'TEST 6: If Transceiver Category is Converter, wavelength must be "N/A"
+            If InStr(wavelength4813, "N/A") = 0 Then
+                errorIdentified = True
+                testsFailed = testsFailed & "Transceiver Category is 'Converter' but Wavelength | 4813 is not 'N/A'" + vbCrLf
+                cellsToBeHighlighted(5) = True
+                cellsToBeHighlighted(11) = True
+            End If
+            'TEST 10: Check if the ITU specific columns are populated even though Transceiver Category is NOT DWDM
+            For Count = 6 To 9
+                If filteredRow(Count) <> Empty Then
+                    nonDWDMPartError = True
+                    cellsToBeHighlighted(Count) = True
+                End If
+            Next Count
+           
+            If nonDWDMPartError Then
+                testsFailed = testsFailed & "Transceiver type not DWDM but at least 1 ITU column is populated" + vbCrLf
+            End If
+            'reset the nonDWDMPartError variable
+            nonDWDMPartError = False
+       
+        Case Else 'Any transceivers NOT DWDM, Copper OR Converter
+             
+            'TEST 6: Check if a Non-Copper/Non-Converter Category Transceiver has a wavelength4813 = "N/A"
+            If Not InStr(wavelength4813, "N/A") = 0 Then
+                errorIdentified = True
+                cellsToBeHighlighted(5) = True
+                cellsToBeHighlighted(11) = True
+                testsFailed = testsFailed & "Wavelength is 'N/A' but transceiver category is not Copper or Converter." + vbCrLf
+            End If
+           
+            'TEST 9: Check WWB Wavelength with Wavelength 4813
+            If WLFromWWB <> Empty Then
+                If InStr(wavelength4813, WLFromWWB) = 0 Then
+                    errorIdentified = True
+                    testsFailed = testsFailed & "Wavelength from 'What We Buy' differs from Wavelength | 4813." + vbCrLf
+                    cellsToBeHighlighted(11) = True
+                    cellsToBeHighlighted(12) = True
+                End If
+            End If
+               
+            'TEST 10: Check if the ITU specific columns are populated even though Transceiver Category is NOT DWDM
+            For Count = 6 To 9
+                If filteredRow(Count) <> Empty Then
+                    nonDWDMPartError = True
+                    cellsToBeHighlighted(Count) = True
+                End If
+            Next Count
+            If nonDWDMPartError Then
+                testsFailed = testsFailed & "Transceiver type not DWDM but at least 1 ITU column is populated" + vbCrLf
+            End If
+            'reset the nonDWDMPartError variable
+            nonDWDMPartError = False
+           
+            'TEST 4: Check that wavelength4813 is in long description
+            If InStr(desLong, wavelength4813) = 0 Then
+                errorIdentified = True
+                testsFailed = testsFailed & "Long description does not contain 'Wavelength | 4813' value." + vbCrLf
+                cellsToBeHighlighted(3) = True
+                cellsToBeHighlighted(11) = True
+            End If
+           
+            'TEST 5: Check that wavelength4813 is in short description
+            If InStr(desShort, wavelength4813) = 0 Then
+                errorIdentified = True
+                testsFailed = testsFailed & "Short description does not contain 'Wavelength | 4813' value." + vbCrLf
+                cellsToBeHighlighted(4) = True
+                cellsToBeHighlighted(11) = True
+            End If
+       
+        End Select
+       
+        'Write to errorLog if any test has failed (i.e. errorIdentified = True)
+        If errorIdentified Then
+            Call writeRowToWorksheet(errorLogWS, errorLogRowNum, filteredRow)
+            'Highlight columns with inconsistencies in errorLog
+            For Count = 0 To findArraySize(cellsToBeHighlighted) - 1
+                If cellsToBeHighlighted(Count) Then
+                    Call Highlight(Cells(errorLogRowNum, Count), 36)
+                End If
+            Next Count
+            'Add WWB and testsFailed to errorLog
+            Cells(errorLogRowNum, errorLogheadersSize + 1) = WWB
+            'Record the tests that failed for particular row.
+            Cells(errorLogRowNum, errorLogheadersSize + 2) = testsFailed
+            errorLogRowNum = errorLogRowNum + 1
+        End If
+        transceiverWS.Activate
+       
+        'Reset variables
+        errorIdentified = False
+        testsFailed = ""
+        WWB = ""
+        WLFromWWB = ""
+       
+        For Count = 0 To findArraySize(cellsToBeHighlighted) - 1
+            cellsToBeHighlighted(Count) = False
+        Next Count
+       
+        If x = 7000 Then
+            g = 5
+        End If
+       
+    Next x
+   
+    Call xlFunctionalitiesOn
+   
+End Sub
